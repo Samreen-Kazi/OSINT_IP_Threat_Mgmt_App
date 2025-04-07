@@ -1,0 +1,4 @@
+config.py
+osint_output.csv
+__pycache__/
+*.pyc
