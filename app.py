@@ -1,13 +1,14 @@
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, filedialog
 import requests
 import csv
-import os
 import logging
 import config
 from datetime import datetime
 import re
 import pycountry
+import os
+import threading
 
 # Font styles for consistency
 default_font = ("Segoe UI", 13)
@@ -106,7 +107,8 @@ def process_ip(ip):
         "Total Reports": total_reports,
         "Last Report": last_report_raw,
         "Threat Score": threat_score,
-        "Threat Level": threat_level
+        "Threat Level": threat_level,
+        "Open Ports": "",
     }
 
 def write_csv(data, filename="osint_output.csv"):
@@ -128,17 +130,69 @@ def write_csv(data, filename="osint_output.csv"):
             if row["IP"] not in existing_ips:
                 writer.writerow(row)
 
+# ========== Suggestions & File Upload ==========
+current_session_data = []
+
+def generate_suggestion(ip):
+    suggestions = []
+    if int(ip.get("Abuse Score", 0)) >= 90:
+        suggestions.append("⚠️ Highly abusive IP — consider blocking.")
+    risky_ports = check_suspicious_ports(ip.get("Open Ports", ""))
+    if risky_ports:
+        suggestions.append("⚠️ Risky ports detected: " + ", ".join(risky_ports))
+    return "\n".join(suggestions) if suggestions else "No immediate action suggested."
+
+def handle_file_upload():
+    threading.Thread(target=process_file_upload_thread).start()
+
+def process_file_upload_thread():
+    global current_session_data
+    file_path = filedialog.askopenfilename(title="Select a File", filetypes=[("Text files", "*.txt")])
+    if file_path:
+        with open(file_path, "r") as f:
+            ips = f.readlines()
+        current_session_data = []
+        for ip in ips:
+            ip_result = process_ip(ip.strip())
+            current_session_data.append(ip_result)
+        write_csv(current_session_data)
+        display_results(current_session_data)
+
+def display_results(data):
+    result_text.delete(1.0, tk.END)
+    for idx, item in enumerate(data, 1):
+        result_text.insert(tk.END, f"Result #{idx}\n")
+        for key, value in item.items():
+            result_text.insert(tk.END, f"{key}: {value}\n")
+        result_text.insert(tk.END, "\nSuggestions:\n")
+        result_text.insert(tk.END, generate_suggestion(item) + "\n")
+        result_text.insert(tk.END, "="*50 + "\n\n")
+
+def apply_filter(event=None):
+    selected = filter_var.get().strip().lower()
+    global current_session_data
+    if not current_session_data:
+        messagebox.showwarning("No Data", "No IP data available in this session.")
+        return
+    if selected == "all":
+        display_results(current_session_data)
+    else:
+        filtered = [
+            row for row in current_session_data
+            if row.get("Threat Level", "").strip().lower() == selected
+        ]
+        if filtered:
+            display_results(filtered)
+        else:
+            messagebox.showinfo("Filter", f"No {selected.title()} threat IPs found.")
+
 # ========== GUI Setup ==========
 root = tk.Tk()
 root.title("OSINT IP Threat Intelligence")
-root.geometry("800x500")
+root.geometry("900x700")
 
-entry = tk.Entry(root, width=40)
+entry = tk.Entry(root, width=50)
 entry.pack(pady=10)
-
-result_text = tk.Text(root, height=20, width=100, font=result_font)
-result_text.pack(pady=10)
-
 
 def handle_ip_search():
     ip = entry.get().strip()
@@ -147,12 +201,25 @@ def handle_ip_search():
         return
     result = process_ip(ip)
     write_csv([result])
-    result_text.delete(1.0, tk.END)
-    for key, value in result.items():
-        result_text.insert(tk.END, f"{key}: {value}\n")
+    global current_session_data
+    current_session_data = [result]
+    display_results(current_session_data)
     messagebox.showinfo("Complete", "IP processed and saved.")
 
-search_btn = tk.Button(root, text="Search", font=default_font, command=handle_ip_search)
-search_btn.pack(pady=10)
+search_btn = tk.Button(root, text="Search", command=handle_ip_search)
+search_btn.pack(pady=5)
+
+upload_btn = tk.Button(root, text="Upload File", command=handle_file_upload)
+upload_btn.pack(pady=5)
+
+filter_var = tk.StringVar(value="All")
+filter_dropdown = ttk.Combobox(root, textvariable=filter_var, state="readonly", width=12)
+filter_dropdown['values'] = ["All", "High", "Medium", "Low", "None"]
+filter_dropdown.current(0)
+filter_dropdown.pack(pady=5)
+filter_dropdown.bind("<<ComboboxSelected>>", apply_filter)
+
+result_text = tk.Text(root, height=30, width=120)
+result_text.pack(pady=10)
 
 root.mainloop()
