@@ -9,17 +9,19 @@ import re
 import pycountry
 import os
 import threading
+import matplotlib.pyplot as plt
+from fpdf import FPDF
+import tempfile
 
-# Font styles for consistency
+# Font styles
 default_font = ("Segoe UI", 13)
 result_font = ("Consolas", 11)
 
-# Common suspicious ports
+# Ports considered suspicious
 suspicious_ports = {"23", "445", "3389", "21", "25", "1433", "3306"}
-
 logging.basicConfig(filename="error_log.txt", level=logging.ERROR)
 
-# ========== API Query Functions ==========
+# === Helper functions ===
 def query_abuseipdb(ip):
     try:
         url = "https://api.abuseipdb.com/api/v2/check"
@@ -58,7 +60,6 @@ def get_country_name(country_code):
     except:
         return "Unknown"
 
-# ========== Threat Calculation ==========
 def check_suspicious_ports(port_str):
     ports = port_str.split(",") if port_str and port_str != "None" else []
     flagged = [p.strip() for p in ports if p.strip() in suspicious_ports]
@@ -73,15 +74,13 @@ def calculate_custom_threat_score(abuse, vt_mal, port_count):
     except:
         return 0
 
-def calculate_threat_level(score, vt_malicious, gn_class):
+def calculate_threat_level(score):
     try:
         if isinstance(score, str) and not score.isdigit(): return "Unknown"
         score = int(score)
-        vt_malicious = int(vt_malicious) if str(vt_malicious).isdigit() else 0
-
-        if score >= 85 or vt_malicious >= 10 or gn_class.lower() == "malicious":
+        if score >= 85:
             return "High"
-        elif score >= 50 or vt_malicious >= 5 or gn_class.lower() == "benign":
+        elif score >= 50:
             return "Medium"
         elif score > 0:
             return "Low"
@@ -89,13 +88,12 @@ def calculate_threat_level(score, vt_malicious, gn_class):
     except:
         return "Unknown"
 
-# ========== Core Processing ==========
 def process_ip(ip):
     ip = ip.strip()
     country, org, asn, hostname = query_ipinfo(ip)
     abuse_score, total_reports, last_report_raw = query_abuseipdb(ip)
     threat_score = calculate_custom_threat_score(abuse_score, 0, 0)
-    threat_level = calculate_threat_level(threat_score, 0, "")
+    threat_level = calculate_threat_level(threat_score)
 
     return {
         "IP": ip,
@@ -122,77 +120,61 @@ def write_csv(data, filename="osint_output.csv"):
 
     with open(filename, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=data[0].keys())
-
         if not file_exists:
             writer.writeheader()
-
         for row in data:
             if row["IP"] not in existing_ips:
                 writer.writerow(row)
 
-# ========== Suggestions & File Upload ==========
-current_session_data = []
+def visualize_data(data):
+    countries = {}
+    scores = []
 
-def generate_suggestion(ip):
-    suggestions = []
-    if int(ip.get("Abuse Score", 0)) >= 90:
-        suggestions.append("⚠️ Highly abusive IP — consider blocking.")
-    risky_ports = check_suspicious_ports(ip.get("Open Ports", ""))
-    if risky_ports:
-        suggestions.append("⚠️ Risky ports detected: " + ", ".join(risky_ports))
-    return "\n".join(suggestions) if suggestions else "No immediate action suggested."
+    for row in data:
+        country = row.get("Country", "Unknown")
+        score = int(row.get("Abuse Score", 0))
+        countries[country] = countries.get(country, 0) + 1
+        scores.append(score)
 
-def handle_file_upload():
-    threading.Thread(target=process_file_upload_thread).start()
+    plt.figure(figsize=(6, 4))
+    plt.hist(scores, bins=10)
+    plt.title("Abuse Score Distribution")
+    plt.xlabel("Score")
+    plt.ylabel("Frequency")
+    plt.tight_layout()
+    plt.savefig("abuse_score_chart.png")
 
-def process_file_upload_thread():
-    global current_session_data
-    file_path = filedialog.askopenfilename(title="Select a File", filetypes=[("Text files", "*.txt")])
-    if file_path:
-        with open(file_path, "r") as f:
-            ips = f.readlines()
-        current_session_data = []
-        for ip in ips:
-            ip_result = process_ip(ip.strip())
-            current_session_data.append(ip_result)
-        write_csv(current_session_data)
-        display_results(current_session_data)
+    plt.figure(figsize=(6, 4))
+    plt.bar(countries.keys(), countries.values())
+    plt.title("IP Country Distribution")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig("country_distribution_chart.png")
 
-def display_results(data):
-    result_text.delete(1.0, tk.END)
-    for idx, item in enumerate(data, 1):
-        result_text.insert(tk.END, f"Result #{idx}\n")
-        for key, value in item.items():
-            result_text.insert(tk.END, f"{key}: {value}\n")
-        result_text.insert(tk.END, "\nSuggestions:\n")
-        result_text.insert(tk.END, generate_suggestion(item) + "\n")
-        result_text.insert(tk.END, "="*50 + "\n\n")
+def export_pdf_report(data):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="IP Threat Intelligence Report", ln=True, align="C")
 
-def apply_filter(event=None):
-    selected = filter_var.get().strip().lower()
-    global current_session_data
-    if not current_session_data:
-        messagebox.showwarning("No Data", "No IP data available in this session.")
-        return
-    if selected == "all":
-        display_results(current_session_data)
-    else:
-        filtered = [
-            row for row in current_session_data
-            if row.get("Threat Level", "").strip().lower() == selected
-        ]
-        if filtered:
-            display_results(filtered)
-        else:
-            messagebox.showinfo("Filter", f"No {selected.title()} threat IPs found.")
+    for row in data:
+        pdf.ln(5)
+        for key, val in row.items():
+            pdf.multi_cell(0, 10, f"{key}: {val}")
+        pdf.ln(2)
+        pdf.multi_cell(0, 10, "=" * 50)
 
-# ========== GUI Setup ==========
+    pdf.add_page()
+    for chart in ["abuse_score_chart.png", "country_distribution_chart.png"]:
+        if os.path.exists(chart):
+            pdf.image(chart, x=10, w=180)
+
+    pdf.output("IP_Threat_Report.pdf")
+
+# GUI Shell (assumes continuation from previous parts)
 root = tk.Tk()
-root.title("OSINT IP Threat Intelligence")
-root.geometry("900x700")
-
-entry = tk.Entry(root, width=50)
-entry.pack(pady=10)
+root.title("OSINT Dashboard - Visualizations")
+root.geometry("800x600")
 
 def handle_ip_search():
     ip = entry.get().strip()
@@ -201,25 +183,32 @@ def handle_ip_search():
         return
     result = process_ip(ip)
     write_csv([result])
-    global current_session_data
-    current_session_data = [result]
-    display_results(current_session_data)
+    display_results([result])
     messagebox.showinfo("Complete", "IP processed and saved.")
+
+def display_results(data):
+    result_text.delete(1.0, tk.END)
+    for row in data:
+        for key, val in row.items():
+            result_text.insert(tk.END, f"{key}: {val}\n")
+        result_text.insert(tk.END, "=" * 50 + "\n")
+
+entry = tk.Entry(root, width=50)
+entry.pack(pady=10)
 
 search_btn = tk.Button(root, text="Search", command=handle_ip_search)
 search_btn.pack(pady=5)
 
-upload_btn = tk.Button(root, text="Upload File", command=handle_file_upload)
-upload_btn.pack(pady=5)
-
-filter_var = tk.StringVar(value="All")
-filter_dropdown = ttk.Combobox(root, textvariable=filter_var, state="readonly", width=12)
-filter_dropdown['values'] = ["All", "High", "Medium", "Low", "None"]
-filter_dropdown.current(0)
-filter_dropdown.pack(pady=5)
-filter_dropdown.bind("<<ComboboxSelected>>", apply_filter)
-
-result_text = tk.Text(root, height=30, width=120)
+result_text = tk.Text(root, height=20, width=100)
 result_text.pack(pady=10)
 
+visualize_btn = tk.Button(root, text="Generate Charts", command=lambda: visualize_data(current_session_data))
+visualize_btn.pack(pady=5)
+
+export_pdf_btn = tk.Button(root, text="Export to PDF", command=lambda: export_pdf_report(current_session_data))
+export_pdf_btn.pack(pady=5)
+
+current_session_data = []
+
 root.mainloop()
+
